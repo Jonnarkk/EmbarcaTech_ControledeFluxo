@@ -1,14 +1,3 @@
-/*
- *  Por: Wilton Lacerda Silva
- *  Data: 16-05-2025
- *
- *  Exemplo de uso de semaforo de contagem com FreeRTOS
- *
- *  Descrição: Simulação de um semáforo de contagem com um botão.
- * Cada vez que o botão é pressionado, um evento é gerado e tratado
- * por uma tarefa. A tarefa atualiza um display OLED com a contagem anotada.
- */
-
 #include "pico/stdlib.h"
 #include "hardware/i2c.h"
 #include "hardware/gpio.h"
@@ -16,6 +5,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "semphr.h"
+#include "buzzer.h"
 #include "pico/bootrom.h"
 #include "stdio.h"
 
@@ -26,9 +16,16 @@
 
 #define BOTAO_A 5 // Gera evento
 #define BOTAO_B 6 // BOOTSEL
+#define BOTAO_J 22 // Botão do Joystick
 
 ssd1306_t ssd;
+bool cor = true;
 SemaphoreHandle_t xContadorSem;
+SemaphoreHandle_t xResetSem;
+SemaphoreHandle_t xBotaoBSem;
+SemaphoreHandle_t xBotaoJSem;
+SemaphoreHandle_t xMutexDisplay;
+
 uint16_t eventosProcessados = 0;
 
 // ISR do botão A (incrementa o semáforo de contagem)
@@ -39,41 +36,39 @@ void gpio_callback(uint gpio, uint32_t events)
     portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
-// Tarefa que consome eventos e mostra no display
-void vContadorTask(void *params)
-{
-    char buffer[32];
 
-    // Tela inicial
-    ssd1306_fill(&ssd, 0);
-    ssd1306_draw_string(&ssd, "Aguardando ", 5, 25);
-    ssd1306_draw_string(&ssd, "  evento...", 5, 34);
-    ssd1306_send_data(&ssd);
-
-    while (true)
-    {
-        // Aguarda semáforo (um evento)
-        if (xSemaphoreTake(xContadorSem, portMAX_DELAY) == pdTRUE)
-        {
-            eventosProcessados++;
-
-            // Atualiza display com a nova contagem
-            ssd1306_fill(&ssd, 0);
-            sprintf(buffer, "Eventos: %d", eventosProcessados);
-            ssd1306_draw_string(&ssd, "Evento ", 5, 10);
-            ssd1306_draw_string(&ssd, "recebido!", 5, 19);
-            ssd1306_draw_string(&ssd, buffer, 5, 44);
+void vTaskEntrada(void *params){
+    while(true){
+        if(xSemaphoreTake(xMutexDisplay, portMAX_DELAY) == pdTRUE){
+            ssd1306_fill(&ssd, !cor);
+            ssd1306_draw_string(&ssd, "Testeeeee 1-2-3", 5, 20);
             ssd1306_send_data(&ssd);
-
-            // Simula tempo de processamento
-            vTaskDelay(pdMS_TO_TICKS(1500));
-
-            // Retorna à tela de espera
-            ssd1306_fill(&ssd, 0);
-            ssd1306_draw_string(&ssd, "Aguardando ", 5, 25);
-            ssd1306_draw_string(&ssd, "  evento...", 5, 34);
-            ssd1306_send_data(&ssd);
+            xSemaphoreGive(xMutexDisplay);
         }
+        
+        if(xSemaphoreTake(xResetSem, portMAX_DELAY) == pdTRUE){
+            ssd1306_fill(&ssd, !cor);
+            ssd1306_draw_string(&ssd, "BOTAO A PRESSIONADO", 5, 20);
+            ssd1306_send_data(&ssd);
+
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+
+void vTaskSaida(void *params){
+    while(true){
+
+    }
+}
+
+
+void vTaskReset(void *params){
+    while(true){
+
     }
 }
 
@@ -86,13 +81,13 @@ void gpio_irq_handler(uint gpio, uint32_t events)
     }
     else if (gpio == BOTAO_A)
     {
-        gpio_callback(gpio, events);
+        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+        xSemaphoreGiveFromISR(xResetSem, &xHigherPriorityTaskWoken);
+        portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
     }
 }
 
-int main()
-{
-    stdio_init_all();
+void setup(){
 
     // Inicialização do display
     i2c_init(I2C_PORT, 400 * 1000);
@@ -107,20 +102,38 @@ int main()
     // Configura os botões
     gpio_init(BOTAO_A);
     gpio_set_dir(BOTAO_A, GPIO_IN);
-    gpio_pull_up(BOTAO_A);
+    gpio_pull_up(BOTAO_A); 
+    gpio_set_irq_enabled_with_callback(BOTAO_A, GPIO_IRQ_EDGE_FALL, true, &gpio_irq_handler);
 
     gpio_init(BOTAO_B);
     gpio_set_dir(BOTAO_B, GPIO_IN);
     gpio_pull_up(BOTAO_B);
+    gpio_set_irq_enabled_with_callback(BOTAO_B, GPIO_IRQ_EDGE_FALL, true, &gpio_irq_handler);
 
-    gpio_set_irq_enabled_with_callback(BOTAO_A, GPIO_IRQ_EDGE_FALL, true, &gpio_irq_handler);
-    gpio_set_irq_enabled(BOTAO_B, GPIO_IRQ_EDGE_FALL, true);
+    gpio_init(BOTAO_J);
+    gpio_set_dir(BOTAO_J, GPIO_IN);
+    gpio_pull_up(BOTAO_J);
+    gpio_set_irq_enabled_with_callback(BOTAO_J, GPIO_IRQ_EDGE_FALL, true, &gpio_irq_handler);
+    
+}
 
-    // Cria semáforo de contagem (máximo 10, inicial 0)
-    xContadorSem = xSemaphoreCreateCounting(10, 0);
+int main()
+{
+    setup();
+    stdio_init_all();
+    
+
+    // Cria o mutex do display
+    xMutexDisplay = xSemaphoreCreateMutex();    
+
+    xResetSem = xSemaphoreCreateBinary();
+    xBotaoBSem = xSemaphoreCreateBinary();
+    xBotaoJSem = xSemaphoreCreateBinary();
 
     // Cria tarefa
-    xTaskCreate(vContadorTask, "ContadorTask", configMINIMAL_STACK_SIZE + 128, NULL, 1, NULL);
+    xTaskCreate(vTaskEntrada, "Task de Entrada", configMINIMAL_STACK_SIZE + 128, NULL, 1, NULL);
+    xTaskCreate(vTaskSaida, "Task de Saida", configMINIMAL_STACK_SIZE + 128, NULL, 1, NULL);
+    xTaskCreate(vTaskReset, "Task de Reset", configMINIMAL_STACK_SIZE + 128, NULL, 1, NULL);
 
     vTaskStartScheduler();
     panic_unsupported();
