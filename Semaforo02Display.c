@@ -24,15 +24,21 @@
 #define MAXNUMEVENTOS 10
 #define INITNUMEVENTOS 0
 
+// Variáveis Globais
 ssd1306_t ssd;
 bool cor = true;
-SemaphoreHandle_t xContadorSem;
-SemaphoreHandle_t xResetSem;
-SemaphoreHandle_t xMutexDisplay;
 char buffer[35];
 absolute_time_t last_time_A = 0;
 absolute_time_t last_time_B = 0;
 absolute_time_t last_time_J = 0;
+
+// Declaração de semáforos & Mutex
+SemaphoreHandle_t xContadorSem;
+SemaphoreHandle_t xResetSem;
+SemaphoreHandle_t xMutexDisplay;
+SemaphoreHandle_t xEntradaDetectadaSem;
+SemaphoreHandle_t xSaidaDetectadaSem;
+SemaphoreHandle_t xBuzzLotadoSem;
 
 volatile uint16_t PessoasPresentes = 0;
 
@@ -42,6 +48,7 @@ void vTaskLED(void *params){
             gpio_put(RED_PIN, false);
             gpio_put(GREEN_PIN, false);
             gpio_put(BLUE_PIN, true);
+
         }
         else if(PessoasPresentes > 0 && PessoasPresentes < MAXNUMEVENTOS - 1){
             gpio_put(RED_PIN, false);
@@ -59,61 +66,88 @@ void vTaskLED(void *params){
             gpio_put(BLUE_PIN, false);
         }
 
-        vTaskDelay(50);
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 
 
 void vTaskEntrada(void *params){
-    while(true){
-        if(xSemaphoreTake(xContadorSem, portMAX_DELAY) == pdTRUE){
-            if(xSemaphoreTake(xMutexDisplay, portMAX_DELAY) == pdTRUE){
-                ssd1306_fill(&ssd, !cor);
-                ssd1306_draw_string(&ssd, "Pessoas(s) entraram", centralizar_texto("Pessoas(s) entraram"), 20);
+    bool mostrandoMsgEntrada = false;
+    TickType_t msgEntradaEndTick = 0;
+    const TickType_t tempoMsgEvento = pdMS_TO_TICKS(2000); // 2 segundos
+
+    while (true) {
+        // Verifica se um novo evento de entrada ocorreu
+        if (xSemaphoreTake(xEntradaDetectadaSem, 0) == pdTRUE) {
+            mostrandoMsgEntrada = true;
+            msgEntradaEndTick = xTaskGetTickCount() + tempoMsgEvento;
+        }
+
+        // Se a mensagem de entrada estiver ativa e o tempo acabou, para de mostrá-la
+        if (mostrandoMsgEntrada && xTaskGetTickCount() >= msgEntradaEndTick) {
+            mostrandoMsgEntrada = false;
+        }
+
+        // Tenta pegar o mutex para atualizar o display
+        if (xSemaphoreTake(xMutexDisplay, pdMS_TO_TICKS(100)) == pdTRUE) { // Timeout para não bloquear indefinidamente
+            ssd1306_fill(&ssd, !cor); // Limpa o display
+
+            if (mostrandoMsgEntrada) {
+                // Exibe mensagem de entrada
+                ssd1306_draw_string(&ssd, "Pessoa(s) ", centralizar_texto("Pessoa(s) "), 20);
+                ssd1306_draw_string(&ssd, "Entraram", centralizar_texto("Entraram"), 30);
                 ssd1306_draw_string(&ssd, "No recinto!", centralizar_texto("No recinto!"), 40);
-                ssd1306_send_data(&ssd);
-
-                vTaskDelay(pdMS_TO_TICKS(1500));
-
-                ssd1306_fill(&ssd, !cor);
-                ssd1306_draw_string(&ssd, "N. de Pessoas", centralizar_texto("N. de Pessoas"), 20);
-                snprintf(buffer, sizeof(buffer), "No Local: %d", PessoasPresentes);
-                ssd1306_draw_string(&ssd, buffer, centralizar_texto(buffer), 40);
-                ssd1306_send_data(&ssd);
-
-                vTaskDelay(pdMS_TO_TICKS(1500));
-
-                xSemaphoreGive(xMutexDisplay);
+            } else {
+                // Exibe contagem padrão OU mensagem de "Aguardando" se 0 pessoas
+                if (PessoasPresentes == 0) {
+                    ssd1306_draw_string(&ssd, "Aguardando", centralizar_texto("Aguardando"), 20);
+                    ssd1306_draw_string(&ssd, "Eventos .....", centralizar_texto("Eventos ....."), 40);
+                } else {
+                    ssd1306_draw_string(&ssd, "N. de Pessoas", centralizar_texto("N. de Pessoas"), 20);
+                    snprintf(buffer, sizeof(buffer), "No Local: %u", PessoasPresentes);
+                    ssd1306_draw_string(&ssd, buffer, centralizar_texto(buffer), 40);
+                }
             }
-    }
-        vTaskDelay(pdMS_TO_TICKS(50));
+            ssd1306_send_data(&ssd);
+            xSemaphoreGive(xMutexDisplay);
+        }
+        vTaskDelay(pdMS_TO_TICKS(50)); // Delay da tarefa
     }
 }
 
 
 void vTaskSaida(void *params){
-    while(true){
-        if(xSemaphoreGive(xContadorSem)){
-            if(xSemaphoreTake(xMutexDisplay, portMAX_DELAY) == pdTRUE){
-                    ssd1306_fill(&ssd, !cor);
-                    ssd1306_draw_string(&ssd, "Pessoas(s) entraram", centralizar_texto("Pessoas(s) entraram"), 20);
-                    ssd1306_draw_string(&ssd, "No recinto!", centralizar_texto("No recinto!"), 40);
-                    ssd1306_send_data(&ssd);
+    bool mostrandoMsgSaida = false;
+    TickType_t msgSaidaEndTick = 0;
+    const TickType_t tempoMsgEvento = pdMS_TO_TICKS(2000); // 2 segundos
 
-                    vTaskDelay(pdMS_TO_TICKS(1500));
-
-                    ssd1306_fill(&ssd, !cor);
-                    ssd1306_draw_string(&ssd, "N. de Pessoas", centralizar_texto("N. de Pessoas"), 20);
-                    snprintf(buffer, sizeof(buffer), "No Local: %d", PessoasPresentes);
-                    ssd1306_draw_string(&ssd, buffer, centralizar_texto(buffer), 40);
-                    ssd1306_send_data(&ssd);
-
-                    vTaskDelay(pdMS_TO_TICKS(1500));
-
-                    xSemaphoreGive(xMutexDisplay);
-                }
+    while (true) {
+        // Verifica se um novo evento de saída ocorreu
+        if (xSemaphoreTake(xSaidaDetectadaSem, 0) == pdTRUE) {
+            mostrandoMsgSaida = true;
+            msgSaidaEndTick = xTaskGetTickCount() + tempoMsgEvento;
         }
-        vTaskDelay(pdMS_TO_TICKS(50));
+
+        // Se a mensagem de saída estiver ativa e o tempo acabou, para de mostrá-la
+        if (mostrandoMsgSaida && xTaskGetTickCount() >= msgSaidaEndTick) {
+            mostrandoMsgSaida = false;
+        }
+
+        // Esta task só atualiza o display SE estiver mostrando sua mensagem de evento
+        if (mostrandoMsgSaida) {
+            if (xSemaphoreTake(xMutexDisplay, pdMS_TO_TICKS(100)) == pdTRUE) {
+                ssd1306_fill(&ssd, !cor); // Limpa o display
+                // Exibe mensagem de saída
+                ssd1306_draw_string(&ssd, "Pessoa(s) ", centralizar_texto("Pessoa(s) "), 20);
+                ssd1306_draw_string(&ssd, "Sairam", centralizar_texto("Sairam"), 30);
+                ssd1306_draw_string(&ssd, "Do recinto!", centralizar_texto("Do recinto!"), 40);
+                ssd1306_send_data(&ssd);
+                xSemaphoreGive(xMutexDisplay);
+            }
+        }
+        // Se não está mostrando sua mensagem, esta task simplesmente cede o processador.
+        // A vTaskEntrada é responsável pela exibição padrão da contagem.
+        vTaskDelay(pdMS_TO_TICKS(50)); // Delay da tarefa
     }
 }
 
@@ -137,7 +171,7 @@ void vTaskReset(void *params){
 
                 buzz(BUZZER, 600, 200);
                 
-                vTaskDelay(pdMS_TO_TICKS(500));
+                vTaskDelay(pdMS_TO_TICKS(250));
                 
                 buzz(BUZZER, 600, 200);
 
@@ -149,25 +183,44 @@ void vTaskReset(void *params){
     }
 }
 
-// ISR para BOOTSEL e botão de evento
+
+void vTaskBuzzLotado(void *pvParameters) {
+    while (true) {
+        // Espera indefinidamente pelo sinal para fazer o buzz
+        if (xSemaphoreTake(xBuzzLotadoSem, portMAX_DELAY) == pdTRUE) {
+            buzz(BUZZER, 750, 150); 
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
+// ISR para Semáforo & contagem de Pessoas
 void gpio_irq_handler(uint gpio, uint32_t events)
 {   
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
     
 
-    if (gpio == BOTAO_A && PessoasPresentes < 10){
+    if (gpio == BOTAO_A){
         absolute_time_t current = to_ms_since_boot(get_absolute_time());
         if(current - last_time_A > 200){
-            xSemaphoreGiveFromISR(xContadorSem, &xHigherPriorityTaskWoken);
-            PessoasPresentes++;
+            if(PessoasPresentes < MAXNUMEVENTOS){
+                PessoasPresentes++;
+                xSemaphoreGiveFromISR(xContadorSem, &xHigherPriorityTaskWoken);
+                xSemaphoreGiveFromISR(xEntradaDetectadaSem, &xHigherPriorityTaskWoken);
+            }
+            else{
+                xSemaphoreGiveFromISR(xBuzzLotadoSem, &xHigherPriorityTaskWoken);
+            }
         }
         last_time_A = current;
     }
     else if (gpio == BOTAO_B && PessoasPresentes > 0){
         absolute_time_t current = to_ms_since_boot(get_absolute_time());
         if(current - last_time_B > 200){
-            xSemaphoreTakeFromISR(xContadorSem, &xHigherPriorityTaskWoken);
             PessoasPresentes--;
+            xSemaphoreTakeFromISR(xContadorSem, &xHigherPriorityTaskWoken);
+            xSemaphoreTakeFromISR(xSaidaDetectadaSem, &xHigherPriorityTaskWoken);
         }
         last_time_B = current;
     }
@@ -242,13 +295,18 @@ int main()
     // Cria o Semáforo de Contagem
     xContadorSem = xSemaphoreCreateCounting(MAXNUMEVENTOS, INITNUMEVENTOS);
     
+    // Cria os Semáforos Binários utilizados
     xResetSem = xSemaphoreCreateBinary();
+    xEntradaDetectadaSem = xSemaphoreCreateBinary();
+    xSaidaDetectadaSem = xSemaphoreCreateBinary();
+    xBuzzLotadoSem = xSemaphoreCreateBinary();
 
     // Cria tarefa
     xTaskCreate(vTaskEntrada, "Task de Entrada", configMINIMAL_STACK_SIZE + 128, NULL, 1, NULL);
     xTaskCreate(vTaskSaida, "Task de Saida", configMINIMAL_STACK_SIZE + 128, NULL, 1, NULL);
     xTaskCreate(vTaskReset, "Task de Reset", configMINIMAL_STACK_SIZE + 128, NULL, 2, NULL);
     xTaskCreate(vTaskLED, "Task de LED", configMINIMAL_STACK_SIZE + 128, NULL, 1, NULL);
+    xTaskCreate(vTaskBuzzLotado, "Task do Buzzer", configMINIMAL_STACK_SIZE + 128, NULL, 3, NULL);
 
     vTaskStartScheduler();
     panic_unsupported();
